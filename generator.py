@@ -1,4 +1,5 @@
 import os
+import warnings
 from collections import Counter
 from datetime import datetime
 from typing import List
@@ -9,10 +10,9 @@ import torch as th
 from PIL import ImageFilter
 from PIL.ImageOps import invert
 from compel import Compel
-from diffusers import ControlNetModel, EulerDiscreteScheduler, StableDiffusionControlNetInpaintPipeline, \
-	StableDiffusionControlNetPipeline
+from diffusers import ControlNetModel, StableDiffusionControlNetInpaintPipeline, \
+	StableDiffusionControlNetPipeline, DPMSolverMultistepScheduler, AutoencoderKL
 from diffusers import StableDiffusionPipeline
-from diffusers import UniPCMultistepScheduler
 from diffusers.utils import load_image
 from rembg import remove as remove_background
 from scipy.spatial import KDTree
@@ -95,49 +95,74 @@ n_runs = 10
 
 room_control_image = 'controlnet_masks/room_mask_v2.png'
 
-room_prompt = "A (side view)+++ screenshot of a room set in {room_name}, (realistic)+++, {room_description}, best quality"
-room_negative_prompt = "top-down, (logo)++, (creature)++, (people)++++, (person)++++, (creatures)+++, (animal)++, (animals)++, face, creatures, ugly, badly drawn, worst quality, frame, glare, solar flare, text, monochromatic, duplication, repetition"
+# room_prompt = "ddstyle, a (side view)+++ screenshot of a room set in {room_name}, {room_description}, best quality"
+room_prompt = "a (side view)+++ screenshot of a room set in {room_name}, {room_description}, best quality"
+room_negative_prompt = "top-down, (logo)++, (creature)++, (people)++, (animal)++, (face)++, ugly, badly drawn, worst quality, frame, glare, solar flare, text, monochromatic, duplication, repetition"
 
 entity_image_size = (768, 512)
 entity_scale = 0.35
 
-controlnet_guidance_scale = 7.5
+controlnet_guidance_scale = 5
+sd_guidance_scale = 5
 entity_inference_steps = 30
 room_inference_steps = 30
 
+device = 'cuda' if th.cuda.is_available() else 'cpu'
+
+if device == 'cpu':
+	warnings.warn('CUDA not available; this will take much longer...')
+
+# vae = AutoencoderKL.from_single_file('models/vaeFtMse840000EmaPruned_vae.safetensors', torch_dtype=th.float16).to(device)
+
 controlnet_mlsd = ControlNetModel.from_pretrained('lllyasviel/control_v11p_sd15_mlsd', torch_dtype=th.float16,
                                                   safety_checker=None, cache_dir='./models')
-sd_room = StableDiffusionControlNetPipeline.from_single_file('models/aZovyaRPGArtistTools_v3.safetensors',
-                                                             safety_checker=None,
-                                                             controlnet=controlnet_mlsd, torch_dtype=th.float16).to(
-	'cuda')
+# sd_room = StableDiffusionControlNetPipeline.from_single_file('models/aZovyaRPGArtistTools_v4.safetensors',
+sd_room = StableDiffusionControlNetPipeline.from_pretrained('runwayml/stable-diffusion-v1-5',
+                                                            cache_dir='./models',
+                                                            safety_checker=None,
+                                                            controlnet=controlnet_mlsd, torch_dtype=th.float16).to(
+	device)
 sd_room.safety_checker = None
-sd_room.scheduler = EulerDiscreteScheduler.from_config(sd_room.scheduler.config)
-# pipeline.enable_model_cpu_offload()
+sd_room.scheduler = DPMSolverMultistepScheduler.from_config(sd_room.scheduler.config, use_karras=True,
+                                                            algorithm_type='sde-dpmsolver++')
+sd_room.set_progress_bar_config(disable=True)
+# sd_room.vae = vae
+# sd_room.load_lora_weights('./models', weight_name='DarkestDungeonV2.safetensors')
 compel_room = Compel(tokenizer=sd_room.tokenizer, text_encoder=sd_room.text_encoder, truncate_long_prompts=False)
 
-sd_entity = StableDiffusionPipeline.from_single_file('models/aZovyaRPGArtistTools_v3.safetensors',
-                                                     torch_dtype=th.float16, safety_checker=None).to(
-	'cuda')
-sd_entity.scheduler = EulerDiscreteScheduler.from_config(sd_entity.scheduler.config)
+# sd_entity = StableDiffusionPipeline.from_single_file('models/aZovyaRPGArtistTools_v4.safetensors',
+sd_entity = StableDiffusionPipeline.from_pretrained('runwayml/stable-diffusion-v1-5',
+                                                    cache_dir='./models',
+                                                    torch_dtype=th.float16, safety_checker=None).to(
+	device)
+sd_entity.scheduler = DPMSolverMultistepScheduler.from_config(sd_entity.scheduler.config, use_karras=True,
+                                                              algorithm_type='sde-dpmsolver++')
 sd_entity.safety_checker = None
-# pipeline.enable_model_cpu_offload()
+sd_entity.set_progress_bar_config(disable=True)
+# sd_entity.vae = vae
+# sd_entity.load_lora_weights('./models', weight_name='NecroSketcherAlpha.safetensors')
 compel_entity = Compel(tokenizer=sd_entity.tokenizer, text_encoder=sd_entity.text_encoder, truncate_long_prompts=False)
 
 controlnet_softedge = ControlNetModel.from_pretrained('lllyasviel/control_v11p_sd15_softedge',
                                                       torch_dtype=th.float16,
                                                       use_safetensors=True,
                                                       safety_checker=None, cache_dir='./models')
-sd_inpaint_entity = StableDiffusionControlNetInpaintPipeline.from_single_file(
-	'models/aZovyaRPGArtistTools_v3.safetensors',
+# sd_inpaint_entity = StableDiffusionControlNetInpaintPipeline.from_single_file(
+# 	'models/aZovyaRPGArtistTools_v4.safetensors',
+sd_inpaint_entity = StableDiffusionControlNetInpaintPipeline.from_pretrained(
+	'runwayml/stable-diffusion-v1-5',
+	cache_dir='./models',
 	controlnet=controlnet_softedge,
 	torch_dtype=th.float16,
 	num_in_channels=4,
 	use_safetensors=True,
-	safety_checker=None).to('cuda')
+	safety_checker=None).to(device)
 sd_inpaint_entity.safety_checker = None
-sd_inpaint_entity.scheduler = UniPCMultistepScheduler.from_config(sd_inpaint_entity.scheduler.config)
-# sd_inpaint_entity.enable_model_cpu_offload()
+sd_inpaint_entity.scheduler = DPMSolverMultistepScheduler.from_config(sd_inpaint_entity.scheduler.config,
+                                                                      use_karras=True, algorithm_type='sde-dpmsolver++')
+sd_inpaint_entity.set_progress_bar_config(disable=True)
+# sd_entity.vae = vae
+# sd_inpaint_entity.load_lora_weights('./models', weight_name='NecroSketcherAlpha.safetensors')
 compel_inpaint_entity = Compel(tokenizer=sd_inpaint_entity.tokenizer, text_encoder=sd_inpaint_entity.text_encoder,
                                truncate_long_prompts=False)
 
@@ -159,22 +184,20 @@ def convert_rgb_to_names(rgb_tuple):
 	return names[index]
 
 
-def prepare_cropped_image(room_image, entity_n, n_entities):
+def prepare_cropped_image(room_image):
 	w, h = room_image.width, room_image.height
-	scaled_entity_height = entity_image_size[0] * entity_scale
-	scaled_entity_width = entity_image_size[1] * entity_scale
-	y_offset = 5 * h / 6
+	r = h / entity_image_size[0]
+	
+	scaled_entity_height = h
+	scaled_entity_width = r * entity_image_size[1]
 	x_offset = w / 2 - scaled_entity_width / 2
-
-	if n_entities > 1:
-		x_offset -= (scaled_entity_width * (n_entities - 1)) / 2
-
+	
 	# get the cropped background from room_image
 	ref_image = room_image.copy()
-	ref_image = ref_image.crop((x_offset + scaled_entity_width * entity_n,
-	                            y_offset - scaled_entity_height,
-	                            x_offset + scaled_entity_width * (entity_n + 1),
-	                            y_offset))
+	ref_image = ref_image.crop((x_offset,
+	                            0,
+	                            x_offset + scaled_entity_width,
+	                            scaled_entity_height))
 	ref_image.save(f'./image_context_test_results/{exp_name}/{room_name}_cropped.png')
 	ref_image = ref_image.resize((entity_image_size[1],
 	                              entity_image_size[0]))
@@ -195,7 +218,7 @@ def generate_room(room_name, room_description):
 	                     prompt_embeds=conditioning, negative_prompt_embeds=negative_conditioning,
 	                     num_inference_steps=room_inference_steps,
 	                     guidance_scale=controlnet_guidance_scale,
-	                     generator=th.Generator(device='cuda').manual_seed(base_rng_seed)).images[0]
+	                     generator=th.Generator(device=device).manual_seed(base_rng_seed)).images[0]
 	room_image.save(f'./image_context_test_results/{exp_name}/{room_name}.png')
 	return room_image
 
@@ -205,15 +228,25 @@ def generate_entity(entity_name, entity_description,
                     room_name=None, room_description=None,
                     colors_to_sd=None,
                     entity_context_image=None, cropped_room_image=None):
+	# prompts = {
+	# 	'no_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'colors_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'semantic_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'semantic_and_colors_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'semantic_and_image_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, masterpiece++, highly detailed+",
+	# 	'caption_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'caption_and_colors_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
+	# 	'caption_and_image_context': "darkest dungeon, (full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, masterpiece++, highly detailed+"
+	# }
 	prompts = {
 		'no_context': "(full body)+++ {entity_name}: ({entity_description})++, (flat empty background)+++, masterpiece++, highly detailed+",
 		'colors_context': "(full body)+++ {entity_name}: ({entity_description})++, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
-		'semantic_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_name}: {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
-		'semantic_and_colors_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_name}: {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
-		'semantic_and_image_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_name}: {place_description}, masterpiece++, highly detailed+",
-		'caption_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
-		'caption_and_colors_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
-		'caption_and_image_context': "(full body)+++ {entity_name}: ({entity_description})++, dressed to be in {place_description}, masterpiece++, highly detailed+"
+		'semantic_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
+		'semantic_and_colors_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
+		'semantic_and_image_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_name}: {place_description}, masterpiece++, highly detailed+",
+		'caption_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, (flat empty background)+++, masterpiece++, highly detailed+",
+		'caption_and_colors_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, prevalent colors are {prevalent_colors}, (flat empty background)+++, masterpiece++, highly detailed+",
+		'caption_and_image_context': "(full body)+++ {entity_name}: ({entity_description})++, set in {place_description}, masterpiece++, highly detailed+"
 	}
 	entity_negative_prompt = "(close-up)+++, out of shot, (multiple characters)++, (many characters)++, not centered, floor, walls, pedestal, duplication, repetition, bad anatomy, monochromatic, disfigured, badly drawn, bad hands, naked, nude"
 
@@ -246,8 +279,9 @@ def generate_entity(entity_name, entity_description,
 	if entity_context_image is None:
 		entity_image = sd_entity(prompt_embeds=conditioning, negative_prompt_embeds=negative_conditioning,
 		                         height=entity_image_size[0], width=entity_image_size[1],
+		                         guidance_scale=sd_guidance_scale,
 		                         num_inference_steps=entity_inference_steps,
-		                         generator=th.Generator(device='cuda').manual_seed(base_rng_seed)).images[0]
+		                         generator=th.Generator(device=device).manual_seed(base_rng_seed)).images[0]
 		entity_image.save(f'./image_context_test_results/{exp_name}/{entity_name}_{room_name}_{context_level}_wb.png')
 		entity_image = remove_background(entity_image)
 	else:
@@ -261,12 +295,12 @@ def generate_entity(entity_name, entity_description,
 		entity_image = sd_inpaint_entity(
 			prompt_embeds=conditioning, negative_prompt_embeds=negative_conditioning,
 			num_inference_steps=entity_inference_steps,
-			eta=1.,
+			# eta=1.,
 			guidance_scale=controlnet_guidance_scale,
 			image=cropped_room_image,
 			mask_image=mask_image,
 			control_image=control_image,
-			generator=th.Generator(device='cuda').manual_seed(base_rng_seed)).images[0]
+			generator=th.Generator(device=device).manual_seed(base_rng_seed)).images[0]
 		entity_image.save(f'./image_context_test_results/{exp_name}/{entity_name}_{room_name}_{context_level}_wb.png')
 		# remove existing background using the mask image again
 		entity_image_arr = np.array(entity_image)
@@ -298,7 +332,7 @@ for n_run in range(n_runs):
 		t.set_postfix_str(f'{exp_name}; {room_name=} ({i + 1}/{len(rooms)})')
 		room_image = generate_room(room_name, room_description)
 
-		cropped_room_image = prepare_cropped_image(room_image, 0, 1)
+		cropped_room_image = prepare_cropped_image(room_image)
 
 		quantized_room_image = room_image.quantize(max_n_colors).convert('RGB')
 		quantized_room_image.save(f'./image_context_test_results/{exp_name}/{room_name}_quantized_{max_n_colors}.png')
